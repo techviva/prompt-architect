@@ -1,0 +1,193 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProcessingStatus {
+  uploaded
+  queued
+  transcribing
+  analyzing
+  generating_prompt
+  completed
+  failed
+}
+
+enum TargetPlatform {
+  auto
+  chatgpt
+  claude
+  gemini
+  generic
+}
+
+enum TaskType {
+  research
+  writing
+  coding
+  strategy
+  operations
+  analysis
+  design
+  automation
+  document_editing
+  planning
+  continuation
+  review_changes
+}
+
+enum ComplexityLevel {
+  low
+  medium
+  high
+  very_high
+}
+
+model Request {
+  id                  String           @id @default(uuid())
+  title               String?
+  status              ProcessingStatus @default(uploaded)
+  targetPlatform      TargetPlatform   @default(auto)
+  userContext          String?          @db.Text
+  parentRequestId     String?
+  continuationContext String?          @db.Text
+  errorMessage        String?          @db.Text
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  parentRequest  Request?  @relation("RevisionChain", fields: [parentRequestId], references: [id])
+  childRequests  Request[] @relation("RevisionChain")
+
+  audioAsset     AudioAsset?
+  attachments    Attachment[]
+  transcript     Transcript?
+  analysisResult AnalysisResult?
+  promptArtifact PromptArtifact?
+  processingJob  ProcessingJob?
+  tags           RequestTag[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([targetPlatform])
+  @@index([parentRequestId])
+}
+
+model AudioAsset {
+  id               String   @id @default(uuid())
+  requestId        String   @unique
+  originalFilename String
+  mimeType         String
+  sizeBytes        Int
+  durationSeconds  Float?
+  storageKey       String
+  createdAt        DateTime @default(now())
+
+  request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+}
+
+model Attachment {
+  id               String   @id @default(uuid())
+  requestId        String
+  originalFilename String
+  mimeType         String
+  sizeBytes        Int
+  storageKey       String
+  createdAt        DateTime @default(now())
+
+  request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
+}
+
+model Transcript {
+  id                String   @id @default(uuid())
+  requestId         String   @unique
+  rawTranscript     String   @db.Text
+  cleanedTranscript String   @db.Text
+  language          String?
+  durationProcessed Float?
+  createdAt         DateTime @default(now())
+
+  request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+}
+
+model AnalysisResult {
+  id                   String          @id @default(uuid())
+  requestId            String          @unique
+  taskType             TaskType
+  taskSubtype          String?
+  complexityScore      Int
+  complexityLevel      ComplexityLevel
+  complexityDrivers    Json
+  suggestedPlatform    String
+  suggestedModel       String
+  suggestedMethodology String          @db.Text
+  requiredCapabilities Json
+  missingInformation   Json
+  risksOrWarnings      Json
+  title                String
+  createdAt            DateTime        @default(now())
+
+  request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([taskType])
+  @@index([complexityLevel])
+}
+
+model PromptArtifact {
+  id             String   @id @default(uuid())
+  requestId      String   @unique
+  platform       String
+  finalPrompt    String   @db.Text
+  followUpPrompt String   @db.Text
+  revisionPrompt String   @db.Text
+  templateUsed   String?
+  createdAt      DateTime @default(now())
+
+  request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+}
+
+model ProcessingJob {
+  id           String           @id @default(uuid())
+  requestId    String           @unique
+  bullJobId    String?
+  status       ProcessingStatus @default(queued)
+  progress     Int              @default(0)
+  startedAt    DateTime?
+  completedAt  DateTime?
+  failedAt     DateTime?
+  errorMessage String?          @db.Text
+  attempts     Int              @default(0)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+}
+
+model HistoryTag {
+  id       String       @id @default(uuid())
+  name     String       @unique
+  color    String?
+  requests RequestTag[]
+}
+
+model RequestTag {
+  requestId String
+  tagId     String
+
+  request Request    @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  tag     HistoryTag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([requestId, tagId])
+}
+
+model UserSetting {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     Json
+  updatedAt DateTime @updatedAt
+}
