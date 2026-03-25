@@ -101,7 +101,13 @@ Analyze this request and return a JSON object with exactly these fields:
   },
   "missingInformation": ["array of things the user should clarify or provide"],
   "risksOrWarnings": ["array of potential issues or things to watch out for"],
-  "title": "A concise 5-10 word title summarizing this request"
+  "title": "A concise 5-10 word title summarizing this request",
+  "distilledObjective": "A 2-4 sentence professional directive stating exactly what the user needs. Transform oral speech into polished written language. Remove ALL hesitations, fillers (um, uh, like, you know, basically), repetitions, self-corrections, and oral artifacts. This statement must be usable directly in a professional AI prompt without any editing. Write it as a clear task statement, not as a description of what the user said.",
+  "deliverables": ["List each concrete, specific output the user expects. Be explicit and actionable. E.g. 'Working Next.js app with authentication', 'Technical spec document'. Maximum 6 items."],
+  "keyConstraints": ["Explicit constraints or requirements mentioned in the user's request only. Do not invent them. E.g. 'Must use TypeScript', 'Target non-technical users'. Empty array if none stated."],
+  "executionRules": ["Specific rules about HOW to do the work, based on what the user described. E.g. 'Explain each step before coding', 'Prioritize mobile UX'. Maximum 4 items. Empty array if none stated."],
+  "outputLanguage": "ISO language code of the primary language in the user's request: 'en' English, 'es' Spanish, 'fr' French, 'pt' Portuguese, etc. Match the language the user spoke in.",
+  "preferredOutputFormat": "User's preferred output format if stated (e.g. 'step-by-step guide', 'working code with tests', 'executive report'). Return null if not specified."
 }
 
 Return ONLY the JSON object, no markdown formatting.`;
@@ -146,6 +152,12 @@ function buildAnalysisFallback(transcript: string): AnalysisResult {
     missingInformation: ["Analysis could not be fully parsed — please review the transcript manually."],
     risksOrWarnings: ["Structured analysis failed; prompt quality may be lower than usual."],
     title: transcript.slice(0, 60).replace(/\n/g, " ").trim() || "Untitled request",
+    distilledObjective: transcript.slice(0, 200).replace(/\n/g, " ").trim(),
+    deliverables: [],
+    keyConstraints: [],
+    executionRules: [],
+    outputLanguage: "en",
+    preferredOutputFormat: null,
   });
 }
 

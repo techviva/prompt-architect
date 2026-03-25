@@ -57,6 +57,12 @@ describe("AnalysisResultSchema", () => {
       missingInformation: ["Tech stack preference"],
       risksOrWarnings: ["Scope may be larger than described"],
       title: "Build a web application",
+      distilledObjective: "Build a web application for project management",
+      deliverables: ["Working web app", "API documentation"],
+      keyConstraints: ["Use TypeScript"],
+      executionRules: ["Follow TDD approach"],
+      outputLanguage: "en",
+      preferredOutputFormat: null,
     };
     expect(AnalysisResultSchema.parse(input)).toEqual(input);
   });

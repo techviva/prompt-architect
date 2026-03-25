@@ -55,6 +55,12 @@ export const AnalysisResultSchema = z.object({
   missingInformation: z.array(z.string()),
   risksOrWarnings: z.array(z.string()),
   title: z.string(),
+  distilledObjective: z.string().default(""),
+  deliverables: z.array(z.string()).default([]),
+  keyConstraints: z.array(z.string()).default([]),
+  executionRules: z.array(z.string()).default([]),
+  outputLanguage: z.string().default("en"),
+  preferredOutputFormat: z.string().nullable().default(null),
 });
 export type AnalysisResult = z.infer<typeof AnalysisResultSchema>;
 
