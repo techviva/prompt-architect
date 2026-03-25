@@ -16,6 +16,23 @@ function getClient(): GoogleGenAI {
   return _client;
 }
 
+// MIME types that Gemini accepts as inlineData (images + PDF)
+const GEMINI_INLINE_MIMETYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "image/heic",
+  "image/heif",
+  "application/pdf",
+]);
+
+export interface AttachmentForGemini {
+  data: Buffer;
+  mimeType: string;
+  filename: string;
+}
+
 const TRANSCRIPTION_PROMPT = `You are an expert audio transcriber. Transcribe the provided audio accurately and completely.
 
 Return a JSON object with exactly these fields:
@@ -33,14 +50,22 @@ Important:
 - If the audio contains multiple topics, use paragraph breaks in the cleaned version
 - Return ONLY the JSON object, no markdown formatting`;
 
-function buildAnalysisPrompt(transcript: string, userContext: string): string {
+function buildAnalysisPrompt(
+  transcript: string,
+  userContext: string,
+  attachmentDescriptions: string[]
+): string {
+  const attachmentSection =
+    attachmentDescriptions.length > 0
+      ? `\nATTACHED FILES (${attachmentDescriptions.length}):\n${attachmentDescriptions.map((d, i) => `${i + 1}. ${d}`).join("\n")}\n`
+      : "";
+
   return `You are a senior AI workflow architect. Analyze the following user request and produce a structured assessment.
 
 USER'S REQUEST (transcribed from audio):
 ${transcript}
 
-${userContext ? `ADDITIONAL CONTEXT PROVIDED BY USER:\n${userContext}\n` : ""}
-
+${userContext ? `ADDITIONAL CONTEXT PROVIDED BY USER:\n${userContext}\n` : ""}${attachmentSection}
 Analyze this request and return a JSON object with exactly these fields:
 
 {
@@ -82,6 +107,64 @@ Analyze this request and return a JSON object with exactly these fields:
 Return ONLY the JSON object, no markdown formatting.`;
 }
 
+// ─── Transcript fallback ──────────────────────────────────────────────────────
+
+function buildTranscriptFallback(rawText: string): TranscriptResult {
+  // If we got something from the model but it wasn't valid JSON,
+  // treat the whole response as the raw transcript.
+  return TranscriptResultSchema.parse({
+    rawTranscript: rawText || "(no transcript produced)",
+    cleanedTranscript: rawText || "(no transcript produced)",
+    language: null,
+    durationProcessed: null,
+  });
+}
+
+// ─── Analysis fallback ────────────────────────────────────────────────────────
+
+function buildAnalysisFallback(transcript: string): AnalysisResult {
+  return AnalysisResultSchema.parse({
+    taskType: "writing",
+    taskSubtype: null,
+    complexityScore: 3,
+    complexityLevel: "medium",
+    complexityDrivers: ["Could not parse structured analysis — using safe defaults"],
+    suggestedPlatform: "generic",
+    suggestedModel: "gpt-4o",
+    suggestedMethodology:
+      "The analysis could not be fully parsed. Review the transcript and apply your judgment to determine the best approach.",
+    requiredCapabilities: {
+      needsWebResearch: false,
+      needsDeepResearch: false,
+      needsAttachments: false,
+      needsPriorContext: false,
+      needsCodeEnvironment: false,
+      needsCanvasLikeEditor: false,
+      needsConnectors: false,
+      needsLongContextModel: false,
+    },
+    missingInformation: ["Analysis could not be fully parsed — please review the transcript manually."],
+    risksOrWarnings: ["Structured analysis failed; prompt quality may be lower than usual."],
+    title: transcript.slice(0, 60).replace(/\n/g, " ").trim() || "Untitled request",
+  });
+}
+
+// ─── JSON extraction ─────────────────────────────────────────────────────────
+
+function extractJson(text: string): string {
+  // Try to extract JSON from markdown code blocks
+  const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) return codeBlockMatch[1].trim();
+
+  // Try to find JSON object directly (greedy — find the outermost braces)
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (jsonMatch) return jsonMatch[0];
+
+  return text.trim();
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
 export async function transcribeAudio(
   audioData: Buffer,
   mimeType: string
@@ -95,58 +178,80 @@ export async function transcribeAudio(
       {
         role: "user",
         parts: [
-          {
-            inlineData: {
-              mimeType,
-              data: base64Audio,
-            },
-          },
+          { inlineData: { mimeType, data: base64Audio } },
           { text: TRANSCRIPTION_PROMPT },
         ],
       },
     ],
-    config: {
-      temperature: 0.1,
-      maxOutputTokens: 8192,
-    },
+    config: { temperature: 0.1, maxOutputTokens: 8192 },
   });
 
-  const text = response.text ?? "";
-  const jsonStr = extractJson(text);
-  const parsed = JSON.parse(jsonStr);
-  return TranscriptResultSchema.parse(parsed);
+  const rawText = response.text ?? "";
+
+  try {
+    const jsonStr = extractJson(rawText);
+    const parsed = JSON.parse(jsonStr);
+    return TranscriptResultSchema.parse(parsed);
+  } catch {
+    // Graceful degradation: treat model output as plain transcript text
+    console.warn("transcribeAudio: JSON parse failed, using raw text as fallback");
+    return buildTranscriptFallback(rawText);
+  }
 }
 
 export async function analyzeTask(
   transcript: string,
-  userContext: string = ""
+  userContext: string = "",
+  attachments: AttachmentForGemini[] = []
 ): Promise<AnalysisResult> {
   const client = getClient();
-  const prompt = buildAnalysisPrompt(transcript, userContext);
+
+  // Split attachments into inline (images/PDF) vs text-readable
+  const inlineParts: Array<{ inlineData: { mimeType: string; data: string } }> = [];
+  const attachmentDescriptions: string[] = [];
+
+  for (const att of attachments) {
+    if (GEMINI_INLINE_MIMETYPES.has(att.mimeType)) {
+      inlineParts.push({
+        inlineData: {
+          mimeType: att.mimeType,
+          data: att.data.toString("base64"),
+        },
+      });
+      attachmentDescriptions.push(`${att.filename} (${att.mimeType}) — sent as inline data`);
+    } else {
+      // Text-like file: decode and append as context description
+      const textContent = att.data.toString("utf-8").slice(0, 4000); // cap at 4k chars
+      attachmentDescriptions.push(
+        `${att.filename} (${att.mimeType}):\n${textContent}${textContent.length >= 4000 ? "\n[...truncated]" : ""}`
+      );
+    }
+  }
+
+  const prompt = buildAnalysisPrompt(transcript, userContext, attachmentDescriptions);
 
   const response = await client.models.generateContent({
     model: "gemini-2.0-flash",
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: {
-      temperature: 0.3,
-      maxOutputTokens: 4096,
-    },
+    contents: [
+      {
+        role: "user",
+        parts: [
+          ...inlineParts,
+          { text: prompt },
+        ],
+      },
+    ],
+    config: { temperature: 0.3, maxOutputTokens: 4096 },
   });
 
-  const text = response.text ?? "";
-  const jsonStr = extractJson(text);
-  const parsed = JSON.parse(jsonStr);
-  return AnalysisResultSchema.parse(parsed);
-}
+  const rawText = response.text ?? "";
 
-function extractJson(text: string): string {
-  // Try to extract JSON from markdown code blocks or raw text
-  const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (codeBlockMatch) return codeBlockMatch[1].trim();
-
-  // Try to find JSON object directly
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (jsonMatch) return jsonMatch[0];
-
-  return text.trim();
+  try {
+    const jsonStr = extractJson(rawText);
+    const parsed = JSON.parse(jsonStr);
+    return AnalysisResultSchema.parse(parsed);
+  } catch {
+    console.warn("analyzeTask: JSON parse failed, using safe fallback analysis");
+    return buildAnalysisFallback(transcript);
+  }
 }

@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createRequest, listRequests, updateRequest } from "@/lib/adapters/db";
-import { ALLOWED_AUDIO_MIMETYPES } from "@/lib/config/constants";
-import { getMaxAudioSizeBytes } from "@/lib/config/env";
-import { transcribeAudio, analyzeTask } from "@/lib/services/gemini";
+import { ALLOWED_AUDIO_MIMETYPES, ALLOWED_ATTACHMENT_MIMETYPES } from "@/lib/config/constants";
+import { getMaxAudioSizeBytes, getMaxAttachmentSizeBytes } from "@/lib/config/env";
+import { transcribeAudio, analyzeTask, type AttachmentForGemini } from "@/lib/services/gemini";
 import { getRecommendation, resolveTargetPlatform } from "@/lib/services/recommendation";
 import { generatePromptPackage } from "@/lib/templates";
 
@@ -41,6 +41,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Collect attachments (multi-value field "attachments")
+    const rawAttachments = formData.getAll("attachments") as File[];
+    const validAttachments = rawAttachments.filter(
+      (f) =>
+        f instanceof File &&
+        f.size > 0 &&
+        f.size <= getMaxAttachmentSizeBytes() &&
+        ALLOWED_ATTACHMENT_MIMETYPES.includes(
+          f.type as (typeof ALLOWED_ATTACHMENT_MIMETYPES)[number]
+        )
+    );
+
     // Create request record
     const request = createRequest({
       targetPlatform,
@@ -56,7 +68,7 @@ export async function POST(req: NextRequest) {
     });
 
     // Process synchronously (no worker/queue needed)
-    processRequest(request.id, audioFile, userContext, continuationContext, targetPlatform).catch(
+    processRequest(request.id, audioFile, validAttachments, userContext, continuationContext, targetPlatform).catch(
       (err) => {
         console.error(`Processing failed for ${request.id}:`, err);
         updateRequest(request.id, {
@@ -85,11 +97,21 @@ export async function POST(req: NextRequest) {
 async function processRequest(
   requestId: string,
   audioFile: File,
+  attachmentFiles: File[],
   userContext: string,
   continuationContext: string,
   targetPlatform: string
 ) {
   const audioBuffer = Buffer.from(await audioFile.arrayBuffer());
+
+  // Pre-load attachment buffers (done once, before any async steps)
+  const attachments: AttachmentForGemini[] = await Promise.all(
+    attachmentFiles.map(async (f) => ({
+      data: Buffer.from(await f.arrayBuffer()),
+      mimeType: f.type,
+      filename: f.name,
+    }))
+  );
 
   // Step 1: Transcription
   updateRequest(requestId, {
@@ -125,9 +147,13 @@ async function processRequest(
     },
   });
 
-  // Step 2: Analysis
+  // Step 2: Analysis (with attachments forwarded to Gemini)
   const enrichedContext = [userContext, continuationContext].filter(Boolean).join("\n\n");
-  const analysis = await analyzeTask(transcriptResult.cleanedTranscript, enrichedContext);
+  const analysis = await analyzeTask(
+    transcriptResult.cleanedTranscript,
+    enrichedContext,
+    attachments
+  );
 
   updateRequest(requestId, {
     analysis: {

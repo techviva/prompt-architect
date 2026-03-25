@@ -34,6 +34,7 @@ import {
   Info,
   GitBranch,
   ChevronRight,
+  Download,
 } from "lucide-react";
 
 interface RequestDetail {
@@ -98,6 +99,48 @@ interface RequestDetail {
 }
 
 const ACTIVE_STATUSES = ["uploaded", "queued", "transcribing", "analyzing", "generating_prompt"];
+
+function buildExportText(data: RequestDetail): string {
+  const sep = "─".repeat(60);
+  const lines: string[] = [
+    `PROMPT ARCHITECT — EXPORT`,
+    sep,
+    `Title    : ${data.title ?? "Untitled"}`,
+    `Date     : ${formatDate(data.createdAt)}`,
+    `Platform : ${getPlatformLabel(data.prompts?.platform ?? data.targetPlatform)}`,
+    `Task     : ${getTaskTypeLabel(data.analysis?.taskType ?? "")}`,
+    `Complexity: ${data.analysis?.complexityLevel ?? "—"} (${data.analysis?.complexityScore ?? "—"}/5)`,
+    sep,
+    "",
+    "## FINAL PROMPT",
+    sep,
+    data.prompts?.finalPrompt ?? "",
+    "",
+    "## FOLLOW-UP PROMPT",
+    sep,
+    data.prompts?.followUpPrompt ?? "",
+    "",
+    "## REVISION PROMPT",
+    sep,
+    data.prompts?.revisionPrompt ?? "",
+    "",
+    "## TRANSCRIPT (CLEANED)",
+    sep,
+    data.transcript?.cleanedTranscript ?? "",
+    "",
+  ];
+  return lines.join("\n");
+}
+
+function downloadAsText(content: string, filename: string) {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 export default function RequestDetailPage() {
   const params = useParams();
@@ -198,6 +241,21 @@ export default function RequestDetailPage() {
           </div>
         </div>
         <div className="flex gap-2">
+          {data.status === "completed" && data.prompts && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const slug = (data.title ?? "prompt")
+                  .toLowerCase()
+                  .replace(/[^a-z0-9]+/g, "-")
+                  .slice(0, 40);
+                downloadAsText(buildExportText(data), `${slug}.txt`);
+              }}
+            >
+              <Download className="mr-1 h-3 w-3" /> Export
+            </Button>
+          )}
           <Link href={`/requests/new?continue=${data.id}`}>
             <Button variant="outline" size="sm">
               <GitBranch className="mr-1 h-3 w-3" /> Continue
