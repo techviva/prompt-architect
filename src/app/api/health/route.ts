@@ -1,49 +1,36 @@
 import { NextResponse } from "next/server";
-import { db } from "@/lib/adapters/db";
 
 export async function GET() {
   const checks: Record<string, { status: string; message?: string }> = {};
 
-  // Check database
-  try {
-    await db.$queryRaw`SELECT 1`;
-    checks.database = { status: "healthy" };
-  } catch (error) {
-    checks.database = {
-      status: "unhealthy",
-      message: error instanceof Error ? error.message : "Connection failed",
-    };
-  }
-
-  // Check Redis
-  try {
-    const { getQueue } = await import("@/lib/adapters/queue");
-    const queue = getQueue();
-    // If we can create the queue, connection params are valid
-    const counts = await queue.getJobCounts();
-    checks.redis = { status: "healthy", message: `Jobs: ${JSON.stringify(counts)}` };
-  } catch (error) {
-    checks.redis = {
-      status: "unhealthy",
-      message: error instanceof Error ? error.message : "Connection failed",
-    };
-  }
-
   // Check Gemini API key presence
+  const hasKey =
+    process.env.GEMINI_API_KEY &&
+    process.env.GEMINI_API_KEY !== "mock-key-for-development";
   checks.gemini = {
-    status: process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "mock-key-for-development"
-      ? "configured"
-      : "not_configured",
+    status: hasKey ? "configured" : "not_configured",
+    message: hasKey ? "API key is set" : "Set GEMINI_API_KEY environment variable",
   };
 
-  const allHealthy = Object.values(checks).every(
-    (c) => c.status === "healthy" || c.status === "configured"
-  );
+  // Runtime info
+  checks.runtime = {
+    status: "healthy",
+    message: "Vercel serverless / Node.js",
+  };
+
+  // Storage mode
+  checks.storage = {
+    status: "healthy",
+    message: "In-memory (serverless). History persists in browser localStorage.",
+  };
+
+  const allHealthy = checks.gemini.status === "configured";
 
   return NextResponse.json(
     {
       status: allHealthy ? "healthy" : "degraded",
       timestamp: new Date().toISOString(),
+      version: "0.2.0",
       checks,
     },
     { status: allHealthy ? 200 : 503 }

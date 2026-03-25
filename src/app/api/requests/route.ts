@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/lib/adapters/db";
-import { getStorage } from "@/lib/adapters/storage";
-import { enqueueProcessingJob } from "@/lib/adapters/queue";
+import { createRequest, listRequests, updateRequest } from "@/lib/adapters/db";
 import { ALLOWED_AUDIO_MIMETYPES } from "@/lib/config/constants";
-import { getMaxAudioSizeBytes, getMaxAttachmentSizeBytes } from "@/lib/config/env";
-import { HistoryFiltersSchema } from "@/lib/schemas";
-import crypto from "crypto";
+import { getMaxAudioSizeBytes } from "@/lib/config/env";
+import { transcribeAudio, analyzeTask } from "@/lib/services/gemini";
+import { getRecommendation, resolveTargetPlatform } from "@/lib/services/recommendation";
+import { generatePromptPackage } from "@/lib/templates";
+
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   try {
@@ -16,197 +17,227 @@ export async function POST(req: NextRequest) {
     const parentRequestId = (formData.get("parentRequestId") as string) || undefined;
     const continuationContext = (formData.get("continuationContext") as string) ?? "";
 
-    // Validate audio file
     if (!audioFile) {
       return NextResponse.json({ error: "Audio file is required" }, { status: 400 });
     }
 
-    if (!ALLOWED_AUDIO_MIMETYPES.includes(audioFile.type as typeof ALLOWED_AUDIO_MIMETYPES[number])) {
+    if (
+      !ALLOWED_AUDIO_MIMETYPES.includes(
+        audioFile.type as (typeof ALLOWED_AUDIO_MIMETYPES)[number]
+      )
+    ) {
       return NextResponse.json(
-        { error: `Invalid audio type: ${audioFile.type}. Allowed: ${ALLOWED_AUDIO_MIMETYPES.join(", ")}` },
+        {
+          error: `Invalid audio type: ${audioFile.type}. Allowed: ${ALLOWED_AUDIO_MIMETYPES.join(", ")}`,
+        },
         { status: 400 }
       );
     }
 
     if (audioFile.size > getMaxAudioSizeBytes()) {
       return NextResponse.json(
-        { error: `Audio file too large. Maximum size: ${getMaxAudioSizeBytes() / 1024 / 1024}MB` },
+        { error: `Audio file too large. Maximum: ${getMaxAudioSizeBytes() / 1024 / 1024}MB` },
         { status: 400 }
       );
     }
 
-    // Validate parent request exists if provided
-    if (parentRequestId) {
-      const parent = await db.request.findUnique({ where: { id: parentRequestId } });
-      if (!parent) {
-        return NextResponse.json({ error: "Parent request not found" }, { status: 404 });
+    // Create request record
+    const request = createRequest({
+      targetPlatform,
+      userContext: userContext || null,
+      parentRequestId: parentRequestId || null,
+      continuationContext: continuationContext || null,
+      audioAsset: {
+        originalFilename: audioFile.name,
+        mimeType: audioFile.type,
+        sizeBytes: audioFile.size,
+        durationSeconds: null,
+      },
+    });
+
+    // Process synchronously (no worker/queue needed)
+    processRequest(request.id, audioFile, userContext, continuationContext, targetPlatform).catch(
+      (err) => {
+        console.error(`Processing failed for ${request.id}:`, err);
+        updateRequest(request.id, {
+          status: "failed",
+          errorMessage: err instanceof Error ? err.message : "Processing failed",
+          job: {
+            status: "failed",
+            progress: 0,
+            startedAt: null,
+            completedAt: null,
+            failedAt: new Date().toISOString(),
+            errorMessage: err instanceof Error ? err.message : "Processing failed",
+            attempts: 1,
+          },
+        });
       }
-    }
-
-    // Store audio file
-    const storage = getStorage();
-    const audioBuffer = Buffer.from(await audioFile.arrayBuffer());
-    const ext = audioFile.name.split(".").pop() ?? "audio";
-    const storageKey = `audio/${crypto.randomUUID()}.${ext}`;
-    await storage.upload(storageKey, audioBuffer, audioFile.type);
-
-    // Handle attachment files
-    const attachmentEntries: Array<{
-      originalFilename: string;
-      mimeType: string;
-      sizeBytes: number;
-      storageKey: string;
-    }> = [];
-
-    const attachments = formData.getAll("attachments") as File[];
-    for (const attachment of attachments) {
-      if (attachment.size > getMaxAttachmentSizeBytes()) continue;
-      const attBuffer = Buffer.from(await attachment.arrayBuffer());
-      const attExt = attachment.name.split(".").pop() ?? "bin";
-      const attKey = `attachments/${crypto.randomUUID()}.${attExt}`;
-      await storage.upload(attKey, attBuffer, attachment.type);
-      attachmentEntries.push({
-        originalFilename: attachment.name,
-        mimeType: attachment.type,
-        sizeBytes: attachment.size,
-        storageKey: attKey,
-      });
-    }
-
-    // Create request with relations
-    const request = await db.request.create({
-      data: {
-        targetPlatform: targetPlatform as "auto" | "chatgpt" | "claude" | "gemini" | "generic",
-        userContext: userContext || null,
-        parentRequestId: parentRequestId || null,
-        continuationContext: continuationContext || null,
-        audioAsset: {
-          create: {
-            originalFilename: audioFile.name,
-            mimeType: audioFile.type,
-            sizeBytes: audioFile.size,
-            storageKey,
-          },
-        },
-        attachments: {
-          create: attachmentEntries,
-        },
-        processingJob: {
-          create: {
-            status: "queued",
-          },
-        },
-      },
-      include: {
-        audioAsset: true,
-        processingJob: true,
-      },
-    });
-
-    // Enqueue processing job
-    await db.request.update({
-      where: { id: request.id },
-      data: { status: "queued" },
-    });
-
-    const bullJobId = await enqueueProcessingJob(request.id);
-    await db.processingJob.update({
-      where: { requestId: request.id },
-      data: { bullJobId },
-    });
-
-    return NextResponse.json(
-      {
-        id: request.id,
-        status: "queued",
-        jobId: bullJobId,
-      },
-      { status: 201 }
     );
+
+    return NextResponse.json({ id: request.id, status: "queued" }, { status: 201 });
   } catch (error) {
     console.error("Error creating request:", error);
-    return NextResponse.json(
-      { error: "Failed to create request" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to create request" }, { status: 500 });
   }
+}
+
+async function processRequest(
+  requestId: string,
+  audioFile: File,
+  userContext: string,
+  continuationContext: string,
+  targetPlatform: string
+) {
+  const audioBuffer = Buffer.from(await audioFile.arrayBuffer());
+
+  // Step 1: Transcription
+  updateRequest(requestId, {
+    status: "transcribing",
+    job: {
+      status: "transcribing",
+      progress: 10,
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      failedAt: null,
+      errorMessage: null,
+      attempts: 1,
+    },
+  });
+
+  const transcriptResult = await transcribeAudio(audioBuffer, audioFile.type);
+
+  updateRequest(requestId, {
+    transcript: {
+      rawTranscript: transcriptResult.rawTranscript,
+      cleanedTranscript: transcriptResult.cleanedTranscript,
+      language: transcriptResult.language,
+    },
+    status: "analyzing",
+    job: {
+      status: "analyzing",
+      progress: 33,
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      failedAt: null,
+      errorMessage: null,
+      attempts: 1,
+    },
+  });
+
+  // Step 2: Analysis
+  const enrichedContext = [userContext, continuationContext].filter(Boolean).join("\n\n");
+  const analysis = await analyzeTask(transcriptResult.cleanedTranscript, enrichedContext);
+
+  updateRequest(requestId, {
+    analysis: {
+      taskType: analysis.taskType,
+      taskSubtype: analysis.taskSubtype,
+      complexityScore: analysis.complexityScore,
+      complexityLevel: analysis.complexityLevel,
+      complexityDrivers: analysis.complexityDrivers,
+      suggestedPlatform: analysis.suggestedPlatform,
+      suggestedModel: analysis.suggestedModel,
+      suggestedMethodology: analysis.suggestedMethodology,
+      requiredCapabilities: analysis.requiredCapabilities as Record<string, boolean>,
+      missingInformation: analysis.missingInformation,
+      risksOrWarnings: analysis.risksOrWarnings,
+      title: analysis.title,
+    },
+    status: "generating_prompt",
+    job: {
+      status: "generating_prompt",
+      progress: 66,
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      failedAt: null,
+      errorMessage: null,
+      attempts: 1,
+    },
+  });
+
+  // Step 3: Prompt generation
+  const recommendation = getRecommendation(analysis);
+  const resolvedPlatform = resolveTargetPlatform(targetPlatform, recommendation);
+
+  const promptPackage = generatePromptPackage(
+    transcriptResult.cleanedTranscript,
+    analysis,
+    resolvedPlatform,
+    userContext || undefined,
+    undefined,
+    continuationContext || undefined
+  );
+
+  updateRequest(requestId, {
+    title: analysis.title,
+    status: "completed",
+    prompts: {
+      platform: resolvedPlatform,
+      finalPrompt: promptPackage.finalPrompt,
+      followUpPrompt: promptPackage.followUpPrompt,
+      revisionPrompt: promptPackage.revisionPrompt,
+      templateUsed: promptPackage.templateUsed,
+    },
+    job: {
+      status: "completed",
+      progress: 100,
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      failedAt: null,
+      errorMessage: null,
+      attempts: 1,
+    },
+  });
 }
 
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
-    const params = Object.fromEntries(searchParams.entries());
-    const filters = HistoryFiltersSchema.parse(params);
+    const search = searchParams.get("search") ?? "";
+    const taskType = searchParams.get("taskType");
+    const platform = searchParams.get("platform");
+    const complexityLevel = searchParams.get("complexityLevel");
+    const page = parseInt(searchParams.get("page") ?? "1");
+    const pageSize = parseInt(searchParams.get("pageSize") ?? "20");
 
-    const where: Record<string, unknown> = {};
+    let items = listRequests();
 
-    if (filters.search) {
-      where.OR = [
-        { title: { contains: filters.search, mode: "insensitive" } },
-      ];
+    if (search) {
+      const q = search.toLowerCase();
+      items = items.filter((r) => r.title?.toLowerCase().includes(q));
+    }
+    if (taskType) {
+      items = items.filter((r) => r.analysis?.taskType === taskType);
+    }
+    if (platform && platform !== "auto") {
+      items = items.filter((r) => r.targetPlatform === platform);
+    }
+    if (complexityLevel) {
+      items = items.filter((r) => r.analysis?.complexityLevel === complexityLevel);
     }
 
-    if (filters.taskType) {
-      where.analysisResult = { taskType: filters.taskType };
-    }
-
-    if (filters.complexityLevel) {
-      where.analysisResult = {
-        ...(where.analysisResult as Record<string, unknown> ?? {}),
-        complexityLevel: filters.complexityLevel,
-      };
-    }
-
-    if (filters.platform && filters.platform !== "auto") {
-      where.targetPlatform = filters.platform;
-    }
-
-    if (filters.dateFrom || filters.dateTo) {
-      where.createdAt = {};
-      if (filters.dateFrom) {
-        (where.createdAt as Record<string, unknown>).gte = new Date(filters.dateFrom);
-      }
-      if (filters.dateTo) {
-        (where.createdAt as Record<string, unknown>).lte = new Date(filters.dateTo);
-      }
-    }
-
-    const [requests, total] = await Promise.all([
-      db.request.findMany({
-        where,
-        orderBy: { createdAt: "desc" },
-        skip: (filters.page - 1) * filters.pageSize,
-        take: filters.pageSize,
-        include: {
-          analysisResult: { select: { taskType: true, complexityLevel: true } },
-        },
-      }),
-      db.request.count({ where }),
-    ]);
-
-    const items = requests.map((r) => ({
-      id: r.id,
-      title: r.title,
-      status: r.status,
-      targetPlatform: r.targetPlatform,
-      createdAt: r.createdAt.toISOString(),
-      taskType: r.analysisResult?.taskType ?? null,
-      complexityLevel: r.analysisResult?.complexityLevel ?? null,
-      parentRequestId: r.parentRequestId,
-    }));
+    const total = items.length;
+    const paged = items.slice((page - 1) * pageSize, page * pageSize);
 
     return NextResponse.json({
-      items,
+      items: paged.map((r) => ({
+        id: r.id,
+        title: r.title,
+        status: r.status,
+        targetPlatform: r.targetPlatform,
+        createdAt: r.createdAt,
+        taskType: r.analysis?.taskType ?? null,
+        complexityLevel: r.analysis?.complexityLevel ?? null,
+        parentRequestId: r.parentRequestId,
+      })),
       total,
-      page: filters.page,
-      pageSize: filters.pageSize,
-      totalPages: Math.ceil(total / filters.pageSize),
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
     });
   } catch (error) {
     console.error("Error fetching requests:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch requests" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch requests" }, { status: 500 });
   }
 }

@@ -2,11 +2,25 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { PlusCircle, History, ArrowRight, Zap, Clock, CheckCircle, AlertCircle } from "lucide-react";
+import {
+  PlusCircle,
+  History,
+  ArrowRight,
+  Zap,
+  Clock,
+  CheckCircle,
+  AlertCircle,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getStatusColor, getStatusLabel, formatRelativeTime, getTaskTypeLabel } from "@/lib/utils";
+import {
+  getStatusColor,
+  getStatusLabel,
+  formatRelativeTime,
+  getTaskTypeLabel,
+} from "@/lib/utils";
+import { loadHistory, type StoredRequest } from "@/lib/client-store";
 
 interface RequestSummary {
   id: string;
@@ -18,33 +32,34 @@ interface RequestSummary {
   complexityLevel: string | null;
 }
 
-interface DashboardData {
-  items: RequestSummary[];
-  total: number;
-}
-
 export default function DashboardPage() {
-  const [data, setData] = useState<DashboardData | null>(null);
+  const [recentItems, setRecentItems] = useState<RequestSummary[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/requests?pageSize=5")
-      .then((r) => r.json())
-      .then(setData)
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    // Load from localStorage (persistent history)
+    const history = loadHistory();
+    const items: RequestSummary[] = history.slice(0, 5).map((r: StoredRequest) => ({
+      id: r.id,
+      title: r.title,
+      status: r.status,
+      targetPlatform: r.targetPlatform,
+      createdAt: r.createdAt,
+      taskType: r.analysis?.taskType ?? null,
+      complexityLevel: r.analysis?.complexityLevel ?? null,
+    }));
+    setRecentItems(items);
+    setLoading(false);
   }, []);
 
-  const stats = data
-    ? {
-        total: data.total,
-        completed: data.items.filter((r) => r.status === "completed").length,
-        processing: data.items.filter(
-          (r) => !["completed", "failed"].includes(r.status)
-        ).length,
-        failed: data.items.filter((r) => r.status === "failed").length,
-      }
-    : { total: 0, completed: 0, processing: 0, failed: 0 };
+  const stats = {
+    total: recentItems.length,
+    completed: recentItems.filter((r) => r.status === "completed").length,
+    processing: recentItems.filter(
+      (r) => !["completed", "failed"].includes(r.status)
+    ).length,
+    failed: recentItems.filter((r) => r.status === "failed").length,
+  };
 
   return (
     <div className="space-y-6">
@@ -126,10 +141,13 @@ export default function DashboardPage() {
           {loading ? (
             <div className="space-y-3">
               {[1, 2, 3].map((i) => (
-                <div key={i} className="h-16 animate-pulse rounded-lg bg-muted" />
+                <div
+                  key={i}
+                  className="h-16 animate-pulse rounded-lg bg-muted"
+                />
               ))}
             </div>
-          ) : data?.items.length === 0 ? (
+          ) : recentItems.length === 0 ? (
             <div className="py-8 text-center">
               <Zap className="mx-auto h-12 w-12 text-muted-foreground/50" />
               <p className="mt-2 text-muted-foreground">No requests yet</p>
@@ -141,7 +159,7 @@ export default function DashboardPage() {
             </div>
           ) : (
             <div className="space-y-2">
-              {data?.items.map((request) => (
+              {recentItems.map((request) => (
                 <Link
                   key={request.id}
                   href={`/requests/${request.id}`}

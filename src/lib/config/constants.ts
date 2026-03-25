@@ -61,16 +61,3 @@ export const COMPLEXITY_LEVELS = [
   "high",
   "very_high",
 ] as const;
-
-export const QUEUE_NAME = "audio-processing";
-
-export const JOB_OPTIONS = {
-  attempts: 3,
-  backoff: {
-    type: "exponential" as const,
-    delay: 5000,
-  },
-  timeout: 300000,
-  removeOnComplete: false,
-  removeOnFail: false,
-};

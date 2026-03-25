@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import { saveToHistory, getFromHistory } from "@/lib/client-store";
 import {
   Card,
   CardContent,
@@ -109,9 +110,22 @@ export default function RequestDetailPage() {
   const fetchData = useCallback(async () => {
     try {
       const res = await fetch(`/api/requests/${id}`);
-      if (!res.ok) throw new Error("Request not found");
+      if (!res.ok) {
+        // Try localStorage fallback (serverless cold start)
+        const cached = getFromHistory(id);
+        if (cached) {
+          setData(cached as unknown as RequestDetail);
+          setLoading(false);
+          return cached.status;
+        }
+        throw new Error("Request not found");
+      }
       const json = await res.json();
       setData(json);
+      // Save completed results to localStorage for persistence
+      if (json.status === "completed" || json.status === "failed") {
+        saveToHistory(json);
+      }
       return json.status;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
