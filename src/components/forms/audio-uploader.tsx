@@ -158,14 +158,33 @@ export function AudioUploader({ file, onFileChange, disabled }: AudioUploaderPro
       // Start drawing
       rafRef.current = requestAnimationFrame(drawFrame);
 
-      // Determine best supported format
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : MediaRecorder.isTypeSupported("audio/webm")
-          ? "audio/webm"
-          : "audio/mp4";
+      // Pick the best supported mimeType, then create the recorder.
+      // Safari throws "The string did not match the expected pattern." when it
+      // dislikes a mimeType even if isTypeSupported didn't reject it, so we
+      // wrap the constructor in try/catch and fall back to no mimeType at all
+      // (letting the browser choose its own default — always works).
+      const preferredTypes = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/mp4",
+        "audio/ogg;codecs=opus",
+        "audio/ogg",
+      ];
+      const preferred = preferredTypes.find((t) => MediaRecorder.isTypeSupported(t)) ?? "";
 
-      const recorder = new MediaRecorder(stream, { mimeType });
+      let recorder: MediaRecorder;
+      try {
+        recorder = preferred
+          ? new MediaRecorder(stream, { mimeType: preferred })
+          : new MediaRecorder(stream);
+      } catch {
+        // Safari rejects the mimeType string — fall back to browser default
+        recorder = new MediaRecorder(stream);
+      }
+
+      // Read the actual format the recorder decided to use
+      const actualMimeType = recorder.mimeType || preferred || "audio/mp4";
+
       mediaRecorderRef.current = recorder;
       chunksRef.current = [];
 
@@ -178,11 +197,12 @@ export function AudioUploader({ file, onFileChange, disabled }: AudioUploaderPro
         stream.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
 
-        // Normalize MIME type: strip codec params before creating the File
-        // "audio/webm;codecs=opus" → "audio/webm"  (server validation requires base type)
-        const baseMimeType = mimeType.split(";")[0].trim();
+        // Normalise: strip codec params ("audio/webm;codecs=opus" → "audio/webm")
+        const baseMimeType = actualMimeType.split(";")[0].trim() || "audio/mp4";
         const blob = new Blob(chunksRef.current, { type: baseMimeType });
-        const ext = baseMimeType.includes("webm") ? "webm" : "m4a";
+        const ext = baseMimeType.includes("webm") ? "webm"
+          : baseMimeType.includes("ogg") ? "ogg"
+          : "m4a";
         const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
         const audioFile = new File([blob], `recording-${ts}.${ext}`, {
           type: baseMimeType,
