@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import { useState, useEffect, Suspense, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,8 @@ import {
 } from "@/components/ui/select";
 import { AudioUploader } from "@/components/forms/audio-uploader";
 import { AttachmentUploader } from "@/components/forms/attachment-uploader";
-import { Loader2, Send, GitBranch } from "lucide-react";
+import { Loader2, Send, GitBranch, Mic, Brain, Sparkles } from "lucide-react";
+import { saveToHistory } from "@/lib/client-store";
 
 function NewRequestForm() {
   const router = useRouter();
@@ -27,8 +28,10 @@ function NewRequestForm() {
   const [userContext, setUserContext] = useState("");
   const [continuationContext, setContinuationContext] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [processingStep, setProcessingStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [parentTitle, setParentTitle] = useState<string | null>(null);
+  const stepTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (continueFrom) {
@@ -52,7 +55,16 @@ function NewRequestForm() {
     }
 
     setSubmitting(true);
+    setProcessingStep(0);
     setError(null);
+
+    // Cycle through step labels while the server processes synchronously
+    const steps = [0, 1, 2, 3];
+    let stepIdx = 0;
+    stepTimerRef.current = setInterval(() => {
+      stepIdx = Math.min(stepIdx + 1, steps.length - 1);
+      setProcessingStep(stepIdx);
+    }, 8000); // advance label every ~8s
 
     try {
       const formData = new FormData();
@@ -78,10 +90,18 @@ function NewRequestForm() {
       }
 
       const data = await res.json();
+
+      // Persist the full result to localStorage BEFORE redirecting.
+      // The detail page will load from here — the API may hit a different
+      // Vercel instance with empty in-memory state.
+      saveToHistory(data);
+
       router.push(`/requests/${data.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
       setSubmitting(false);
+    } finally {
+      if (stepTimerRef.current) clearInterval(stepTimerRef.current);
     }
   };
 
@@ -238,7 +258,12 @@ function NewRequestForm() {
             {submitting ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Processing...
+                {[
+                  "Uploading audio…",
+                  "Transcribing…",
+                  "Analyzing request…",
+                  "Generating prompts…",
+                ][processingStep]}
               </>
             ) : (
               <>

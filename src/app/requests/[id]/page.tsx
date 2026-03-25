@@ -152,24 +152,36 @@ export default function RequestDetailPage() {
 
   const fetchData = useCallback(async () => {
     try {
+      // 1. Check localStorage FIRST — the POST handler saves the full result
+      //    before redirecting, so this is always populated on first load.
+      //    This also handles Vercel cold-start where the API hits a different
+      //    in-memory instance and would return 404.
+      const cached = getFromHistory(id);
+      if (cached && (cached.status === "completed" || cached.status === "failed")) {
+        setData(cached as unknown as RequestDetail);
+        setLoading(false);
+        return cached.status;
+      }
+
+      // 2. Try the API (works when same Vercel instance is still warm)
       const res = await fetch(`/api/requests/${id}`);
-      if (!res.ok) {
-        // Try localStorage fallback (serverless cold start)
-        const cached = getFromHistory(id);
-        if (cached) {
-          setData(cached as unknown as RequestDetail);
-          setLoading(false);
-          return cached.status;
+      if (res.ok) {
+        const json = await res.json();
+        setData(json);
+        if (json.status === "completed" || json.status === "failed") {
+          saveToHistory(json);
         }
-        throw new Error("Request not found");
+        return json.status;
       }
-      const json = await res.json();
-      setData(json);
-      // Save completed results to localStorage for persistence
-      if (json.status === "completed" || json.status === "failed") {
-        saveToHistory(json);
+
+      // 3. API returned 404/error — fall back to any cached version
+      if (cached) {
+        setData(cached as unknown as RequestDetail);
+        setLoading(false);
+        return cached.status;
       }
-      return json.status;
+
+      throw new Error("Request not found");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
       return null;

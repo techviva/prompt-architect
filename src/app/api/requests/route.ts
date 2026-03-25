@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createRequest, listRequests, updateRequest } from "@/lib/adapters/db";
+import { createRequest, getRequest, listRequests, updateRequest } from "@/lib/adapters/db";
 import { ALLOWED_AUDIO_MIMETYPES, ALLOWED_ATTACHMENT_MIMETYPES } from "@/lib/config/constants";
 import { getMaxAudioSizeBytes, getMaxAttachmentSizeBytes } from "@/lib/config/env";
 import { transcribeAudio, analyzeTask, type AttachmentForGemini } from "@/lib/services/gemini";
@@ -71,27 +71,44 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    // Process synchronously (no worker/queue needed)
-    processRequest(request.id, audioFile, audioMimeType, validAttachments, userContext, continuationContext, targetPlatform).catch(
-      (err) => {
-        console.error(`Processing failed for ${request.id}:`, err);
-        updateRequest(request.id, {
+    // Process SYNCHRONOUSLY and await completion before responding.
+    // Vercel terminates background tasks once the response is sent,
+    // and each invocation has its own memory — the client must receive
+    // the full result in this response so it can persist it to localStorage.
+    try {
+      await processRequest(
+        request.id,
+        audioFile,
+        audioMimeType,
+        validAttachments,
+        userContext,
+        continuationContext,
+        targetPlatform
+      );
+    } catch (err) {
+      console.error(`Processing failed for ${request.id}:`, err);
+      updateRequest(request.id, {
+        status: "failed",
+        errorMessage: err instanceof Error ? err.message : "Processing failed",
+        job: {
           status: "failed",
+          progress: 0,
+          startedAt: null,
+          completedAt: null,
+          failedAt: new Date().toISOString(),
           errorMessage: err instanceof Error ? err.message : "Processing failed",
-          job: {
-            status: "failed",
-            progress: 0,
-            startedAt: null,
-            completedAt: null,
-            failedAt: new Date().toISOString(),
-            errorMessage: err instanceof Error ? err.message : "Processing failed",
-            attempts: 1,
-          },
-        });
-      }
-    );
+          attempts: 1,
+        },
+      });
+    }
 
-    return NextResponse.json({ id: request.id, status: "queued" }, { status: 201 });
+    // Return the complete record (completed or failed) so the client
+    // can store it in localStorage and show results without a second API call.
+    const finalRecord = getRequest(request.id);
+    return NextResponse.json(
+      { ...finalRecord, parentRequest: null, childRequests: [] },
+      { status: 201 }
+    );
   } catch (error) {
     console.error("Error creating request:", error);
     return NextResponse.json({ error: "Failed to create request" }, { status: 500 });
