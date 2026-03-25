@@ -36,9 +36,18 @@ export default function DashboardPage() {
   const [recentItems, setRecentItems] = useState<RequestSummary[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const [allCount, setAllCount] = useState({ total: 0, completed: 0, processing: 0, failed: 0 });
+
   useEffect(() => {
-    // Load from localStorage (persistent history)
     const history = loadHistory();
+    // Stats over full history
+    setAllCount({
+      total: history.length,
+      completed: history.filter((r) => r.status === "completed").length,
+      processing: history.filter((r) => !["completed", "failed"].includes(r.status)).length,
+      failed: history.filter((r) => r.status === "failed").length,
+    });
+    // Recent items for the list
     const items: RequestSummary[] = history.slice(0, 5).map((r: StoredRequest) => ({
       id: r.id,
       title: r.title,
@@ -52,14 +61,7 @@ export default function DashboardPage() {
     setLoading(false);
   }, []);
 
-  const stats = {
-    total: recentItems.length,
-    completed: recentItems.filter((r) => r.status === "completed").length,
-    processing: recentItems.filter(
-      (r) => !["completed", "failed"].includes(r.status)
-    ).length,
-    failed: recentItems.filter((r) => r.status === "failed").length,
-  };
+  const stats = allCount;
 
   return (
     <div className="space-y-6">
