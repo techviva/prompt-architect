@@ -119,11 +119,11 @@ function NewRequestForm() {
         {/* Audio Upload */}
         <Card>
           <CardHeader>
-            <CardTitle>Audio File</CardTitle>
+            <CardTitle>Record or upload your audio</CardTitle>
             <CardDescription>
               {continueFrom
                 ? "Record what you want to continue, change, or revise"
-                : "Upload a recording of your idea or request"}
+                : "Tap to record directly, or upload an existing audio file"}
             </CardDescription>
           </CardHeader>
           <CardContent>
