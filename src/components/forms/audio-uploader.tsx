@@ -178,12 +178,14 @@ export function AudioUploader({ file, onFileChange, disabled }: AudioUploaderPro
         stream.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
 
-        // Build File and hand it up
-        const blob = new Blob(chunksRef.current, { type: mimeType });
-        const ext = mimeType.includes("webm") ? "webm" : "m4a";
+        // Normalize MIME type: strip codec params before creating the File
+        // "audio/webm;codecs=opus" → "audio/webm"  (server validation requires base type)
+        const baseMimeType = mimeType.split(";")[0].trim();
+        const blob = new Blob(chunksRef.current, { type: baseMimeType });
+        const ext = baseMimeType.includes("webm") ? "webm" : "m4a";
         const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
         const audioFile = new File([blob], `recording-${ts}.${ext}`, {
-          type: mimeType,
+          type: baseMimeType,
         });
         onFileChange(audioFile);
       };

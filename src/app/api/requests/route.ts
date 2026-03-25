@@ -21,9 +21,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Audio file is required" }, { status: 400 });
     }
 
+    // Normalize MIME type: strip codec parameters
+    // e.g. "audio/webm;codecs=opus" → "audio/webm"
+    const audioMimeType = audioFile.type.split(";")[0].trim();
+
     if (
       !ALLOWED_AUDIO_MIMETYPES.includes(
-        audioFile.type as (typeof ALLOWED_AUDIO_MIMETYPES)[number]
+        audioMimeType as (typeof ALLOWED_AUDIO_MIMETYPES)[number]
       )
     ) {
       return NextResponse.json(
@@ -61,14 +65,14 @@ export async function POST(req: NextRequest) {
       continuationContext: continuationContext || null,
       audioAsset: {
         originalFilename: audioFile.name,
-        mimeType: audioFile.type,
+        mimeType: audioMimeType,
         sizeBytes: audioFile.size,
         durationSeconds: null,
       },
     });
 
     // Process synchronously (no worker/queue needed)
-    processRequest(request.id, audioFile, validAttachments, userContext, continuationContext, targetPlatform).catch(
+    processRequest(request.id, audioFile, audioMimeType, validAttachments, userContext, continuationContext, targetPlatform).catch(
       (err) => {
         console.error(`Processing failed for ${request.id}:`, err);
         updateRequest(request.id, {
@@ -97,6 +101,7 @@ export async function POST(req: NextRequest) {
 async function processRequest(
   requestId: string,
   audioFile: File,
+  audioMimeType: string,
   attachmentFiles: File[],
   userContext: string,
   continuationContext: string,
@@ -127,7 +132,7 @@ async function processRequest(
     },
   });
 
-  const transcriptResult = await transcribeAudio(audioBuffer, audioFile.type);
+  const transcriptResult = await transcribeAudio(audioBuffer, audioMimeType);
 
   updateRequest(requestId, {
     transcript: {
